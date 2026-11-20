@@ -6,7 +6,8 @@ Upstream: `wlx219/huangguo-vip-app`, commit
 ## Toolchain
 
 - Flutter 3.24.5 / Dart 3.5.4, matching the upstream successful iOS build.
-- iOS compilation runs on the `macos-14` GitHub Actions runner.
+- iOS compilation runs on `macos-15-intel` with Xcode 16.4. The upstream
+  `macos-14` runner retired from GitHub Actions on 2026-11-02.
 - The workflow is manually triggered and runs static analysis and regression
   tests before compiling. It has read-only repository permissions.
 
