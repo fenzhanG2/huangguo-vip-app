@@ -1,17 +1,17 @@
 name: Build iOS IPA
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: macos-14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: zulu
-          java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.5'
@@ -19,6 +19,10 @@ jobs:
           cache: true
       - name: Flutter pub get
         run: flutter pub get
+      - name: Analyze
+        run: flutter analyze
+      - name: Regression tests
+        run: flutter test
       - name: Build iOS (no codesign)
         run: flutter build ios --release --no-codesign
       - name: Package unsigned IPA
@@ -32,4 +36,5 @@ jobs:
         with:
           name: huangguo-vip-ipa
           path: build/ios/iphoneos/huangguo-vip-unsigned.ipa
+          if-no-files-found: error
           retention-days: 30

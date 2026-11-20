@@ -4,30 +4,46 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
+import 'video_api.dart';
+
+const _apiBases = [
+  'https://huangguoai.com',
+  'https://ctb09.ir95e08v.cc',
+];
+
+int? _integer(dynamic value) =>
+    value is int ? value : int.tryParse(value.toString());
 
 void main() {
   runApp(const HuangguoVIPApp());
 }
 
 class HuangguoVIPApp extends StatelessWidget {
-  const HuangguoVIPApp({super.key});
+  final http.Client? client;
+
+  const HuangguoVIPApp({super.key, this.client});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: '黄果短剧 VIP版',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.amber),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.amber,
+          brightness: Brightness.dark,
+        ),
         useMaterial3: true,
         brightness: Brightness.dark,
       ),
-      home: const HomePage(),
+      home: HomePage(client: client),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  final http.Client? client;
+
+  const HomePage({super.key, this.client});
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -35,73 +51,96 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final List<Map<String, dynamic>> _dramas = [];
+  late final http.Client _client = widget.client ?? http.Client();
   bool _loading = true;
-  int _currentPage = 1;
-  final int _totalPages = 144;
+  int _currentPage = 0;
+  int _requestId = 0;
+  bool _hasMore = true;
+  String? _error;
   String _filterStatus = 'all';
   String _filterSort = 'hot';
   bool _isVIP = true;
-
-  final List<String> _apiBases = [
-    'https://huangguoai.com',
-    'https://ctb09.ir95e08v.cc',
-  ];
 
   @override
   void initState() {
     super.initState();
     _loadVIPStatus();
-    _loadDramas();
+    _loadDramas(reset: true);
   }
 
   Future<void> _loadVIPStatus() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
       _isVIP = prefs.getBool('isVIP') ?? true;
     });
   }
 
-  Future<void> _loadDramas() async {
-    setState(() => _loading = true);
+  Future<void> _loadDramas({bool reset = false}) async {
+    if (_loading && !reset) return;
+    final requestId = ++_requestId;
+    final page = reset ? 1 : _currentPage + 1;
+    final params = <String, String>{
+      'page': page.toString(),
+      'sort': _filterSort,
+      if (_filterStatus == 'completed') 'is_finished': '1',
+      if (_filterStatus == 'unfinished') 'is_finished': '0',
+    };
+    setState(() {
+      _loading = true;
+      _error = null;
+      if (reset) {
+        _dramas.clear();
+        _currentPage = 0;
+        _hasMore = true;
+      }
+    });
 
     for (final apiBase in _apiBases) {
+      if (!mounted || requestId != _requestId) return;
       try {
-        final params = <String, String>{
-          'page': _currentPage.toString(),
-          if (_filterSort == 'hot') 'sort': 'hot',
-          if (_filterSort == 'new') 'sort': 'new',
-          if (_filterStatus == 'completed') 'is_finished': '1',
-          if (_filterStatus == 'unfinished') 'is_finished': '0',
-        };
-
-        final uri = Uri.parse('$apiBase/api/videos').replace(queryParameters: params);
-        final response = await http.get(
+        final uri =
+            Uri.parse('$apiBase/api/videos').replace(queryParameters: params);
+        final response = await _client.get(
           uri,
           headers: {
             'Accept': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+            'User-Agent':
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
           },
         ).timeout(const Duration(seconds: 10));
+        if (!mounted || requestId != _requestId) return;
 
         if (response.statusCode == 200) {
           final data = json.decode(response.body);
           if (data['status'] == 1 && data['data'] != null) {
             final items = data['data']['items'] as List<dynamic>?;
             if (items != null) {
-              setState(() {
-                _dramas.clear();
-                for (final item in items) {
-                  _dramas.add({
-                    'id': item['id'],
-                    'title': item['title'] ?? '',
-                    'cover': item['cover'] ?? '',
-                    'score': (item['score'] ?? 0).toDouble(),
-                    'episodes': item['episode_count'] ?? 1,
-                    'isFinished': item['is_finished'] == true || item['is_finished'] == 1,
-                    'tags': item['tags'] ?? [],
-                    'desc': item['description'] ?? '',
-                  });
+              final dramas = items.map((item) {
+                final id = _integer(item['id']);
+                if (id == null) {
+                  throw const FormatException('Missing drama ID');
                 }
+                return <String, dynamic>{
+                  'id': id,
+                  'title': item['title']?.toString() ?? '',
+                  'cover': item['cover']?.toString() ?? '',
+                  'score': double.tryParse('${item['score']}') ?? 0.0,
+                  'episodes': _integer(item['episode_count']) ?? 1,
+                  'isFinished': item['is_finished'] == true ||
+                      _integer(item['is_finished']) == 1,
+                  'tags': item['tags'] is List ? item['tags'] : [],
+                  'desc': item['description']?.toString() ?? '',
+                };
+              }).toList();
+              final pagination = data['data']['pagination'];
+              final totalPages =
+                  pagination is Map ? _integer(pagination['pages']) : null;
+              setState(() {
+                _dramas.addAll(dramas);
+                _currentPage = page;
+                _hasMore = items.isNotEmpty &&
+                    (totalPages == null || page < totalPages);
                 _loading = false;
               });
               return;
@@ -109,12 +148,22 @@ class _HomePageState extends State<HomePage> {
           }
         }
       } catch (e) {
-        print('API error: $e');
+        debugPrint('API error: $e');
         continue;
       }
     }
 
-    setState(() => _loading = false);
+    if (!mounted || requestId != _requestId) return;
+    setState(() {
+      _loading = false;
+      _error = '加载失败，请检查网络后重试';
+    });
+  }
+
+  @override
+  void dispose() {
+    if (widget.client == null) _client.close();
+    super.dispose();
   }
 
   @override
@@ -157,119 +206,152 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      body: _loading
+      body: _loading && _dramas.isEmpty
           ? const Center(child: CircularProgressIndicator())
-          : GridView.builder(
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                childAspectRatio: 3 / 4,
-                crossAxisSpacing: 8,
-                mainAxisSpacing: 8,
-              ),
-              padding: const EdgeInsets.all(8),
-              itemCount: _dramas.length + (_currentPage < _totalPages ? 1 : 0),
-              itemBuilder: (context, index) {
-                if (index == _dramas.length) {
-                  return Center(
-                    child: ElevatedButton(
-                      onPressed: () {
-                        setState(() {
-                          _currentPage++;
-                        });
-                        _loadDramas();
+          : _dramas.isEmpty && _error != null
+              ? _LoadError(message: _error!, onRetry: () => _loadDramas())
+              : _dramas.isEmpty
+                  ? const Center(child: Text('暂无短剧'))
+                  : GridView.builder(
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 3,
+                        childAspectRatio: 3 / 4,
+                        crossAxisSpacing: 8,
+                        mainAxisSpacing: 8,
+                      ),
+                      padding: const EdgeInsets.all(8),
+                      itemCount: _dramas.length + (_hasMore ? 1 : 0),
+                      itemBuilder: (context, index) {
+                        if (index == _dramas.length) {
+                          return Center(
+                            child: _loading
+                                ? const CircularProgressIndicator()
+                                : ElevatedButton(
+                                    onPressed: () => _loadDramas(),
+                                    child:
+                                        Text(_error == null ? '加载更多' : '重试加载'),
+                                  ),
+                          );
+                        }
+                        final drama = _dramas[index];
+                        return DramaCard(
+                          drama: drama,
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => DetailPage(
+                                dramaId: drama['id'],
+                                client: widget.client,
+                              ),
+                            ),
+                          ),
+                        );
                       },
-                      child: const Text('加载更多'),
                     ),
-                  );
-                }
-                final drama = _dramas[index];
-                return DramaCard(
-                  drama: drama,
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => DetailPage(dramaId: drama['id']),
-                    ),
-                  ),
-                );
-              },
-            ),
     );
   }
 
-  void _showFilterDialog() {
-    showDialog(
+  Future<void> _showFilterDialog() async {
+    var status = _filterStatus;
+    var sort = _filterSort;
+    final applied = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('筛选条件'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('状态'),
-            Row(
-              children: [
-                FilterChip(
-                  label: const Text('全部'),
-                  selected: _filterStatus == 'all',
-                  onSelected: (selected) {
-                    setState(() => _filterStatus = 'all');
-                  },
-                ),
-                const SizedBox(width: 8),
-                FilterChip(
-                  label: const Text('已完结'),
-                  selected: _filterStatus == 'completed',
-                  onSelected: (selected) {
-                    setState(() => _filterStatus = 'completed');
-                  },
-                ),
-                const SizedBox(width: 8),
-                FilterChip(
-                  label: const Text('连载中'),
-                  selected: _filterStatus == 'unfinished',
-                  onSelected: (selected) {
-                    setState(() => _filterStatus = 'unfinished');
-                  },
-                ),
-              ],
+      builder: (context) => StatefulBuilder(
+        builder: (context, updateDialog) => AlertDialog(
+          title: const Text('筛选条件'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('状态'),
+              Wrap(
+                spacing: 8,
+                children: [
+                  FilterChip(
+                    label: const Text('全部'),
+                    selected: status == 'all',
+                    onSelected: (selected) {
+                      updateDialog(() => status = 'all');
+                    },
+                  ),
+                  FilterChip(
+                    label: const Text('已完结'),
+                    selected: status == 'completed',
+                    onSelected: (selected) {
+                      updateDialog(() => status = 'completed');
+                    },
+                  ),
+                  FilterChip(
+                    label: const Text('连载中'),
+                    selected: status == 'unfinished',
+                    onSelected: (selected) {
+                      updateDialog(() => status = 'unfinished');
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Text('排序'),
+              Wrap(
+                spacing: 8,
+                children: [
+                  FilterChip(
+                    label: const Text('热门'),
+                    selected: sort == 'hot',
+                    onSelected: (selected) {
+                      updateDialog(() => sort = 'hot');
+                    },
+                  ),
+                  FilterChip(
+                    label: const Text('最新'),
+                    selected: sort == 'new',
+                    onSelected: (selected) {
+                      updateDialog(() => sort = 'new');
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
             ),
-            const SizedBox(height: 16),
-            const Text('排序'),
-            Row(
-              children: [
-                FilterChip(
-                  label: const Text('热门'),
-                  selected: _filterSort == 'hot',
-                  onSelected: (selected) {
-                    setState(() => _filterSort = 'hot');
-                  },
-                ),
-                const SizedBox(width: 8),
-                FilterChip(
-                  label: const Text('最新'),
-                  selected: _filterSort == 'new',
-                  onSelected: (selected) {
-                    setState(() => _filterSort = 'new');
-                  },
-                ),
-              ],
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('应用'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              setState(() => _currentPage = 1);
-              _loadDramas();
-              Navigator.pop(context);
-            },
-            child: const Text('应用'),
-          ),
-        ],
+      ),
+    );
+    if (!mounted || applied != true) return;
+    _filterStatus = status;
+    _filterSort = sort;
+    await _loadDramas(reset: true);
+  }
+}
+
+class _LoadError extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+
+  const _LoadError({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(message, textAlign: TextAlign.center),
+            const SizedBox(height: 12),
+            ElevatedButton(onPressed: onRetry, child: const Text('重试')),
+          ],
+        ),
       ),
     );
   }
@@ -311,26 +393,36 @@ class DramaCard extends StatelessWidget {
                     drama['title'],
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                    style: const TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 4),
                   Row(
                     children: [
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 2),
                         decoration: BoxDecoration(
                           color: Colors.amber,
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Text(
                           drama['score'].toStringAsFixed(1),
-                          style: const TextStyle(fontSize: 10, color: Colors.black),
+                          style: const TextStyle(
+                              fontSize: 10, color: Colors.black),
                         ),
                       ),
                       const SizedBox(width: 4),
-                      Text(
-                        drama['isFinished'] ? '全${drama['episodes']}集' : '更新至${drama['episodes']}集',
-                        style: const TextStyle(fontSize: 10, color: Colors.grey),
+                      Expanded(
+                        child: Text(
+                          drama['isFinished']
+                              ? '全${drama['episodes']}集'
+                              : '更新至${drama['episodes']}集',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style:
+                              const TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
                       ),
                     ],
                   ),
@@ -346,17 +438,24 @@ class DramaCard extends StatelessWidget {
 
 class DetailPage extends StatefulWidget {
   final int dramaId;
+  final http.Client? client;
 
-  const DetailPage({super.key, required this.dramaId});
+  const DetailPage({super.key, required this.dramaId, this.client});
 
   @override
   State<DetailPage> createState() => _DetailPageState();
 }
 
 class _DetailPageState extends State<DetailPage> {
-  Map<String, dynamic>? _drama;
+  late final http.Client _client = widget.client ?? http.Client();
+  late final VideoApi _api = VideoApi(
+    client: _client,
+    baseUrls: _apiBases.map(Uri.parse).toList(),
+  );
+  VideoDetail? _drama;
   List<int> _episodes = [];
   bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
@@ -365,116 +464,115 @@ class _DetailPageState extends State<DetailPage> {
   }
 
   Future<void> _loadDetail() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
 
     try {
-      final response = await http.get(
-        Uri.parse('https://huangguoai.com/video/${widget.dramaId}/'),
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
-        },
-      ).timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        final html = response.body;
-        final match = RegExp(r'<script[^>]*id="videoInitialData"[^>]*>(.*?)</script>')
-            .firstMatch(html);
-        if (match != null) {
-          final jsonStr = match.group(1)!;
-          final data = json.decode(jsonStr);
-          final tracking = data['tracking'] as Map<String, dynamic>?;
-          final totalEp = tracking?['total_episode'] ?? 1;
-          final epPlaySrcs = data['epPlaySrcs'] as Map<String, dynamic>?;
-          final availableEps = epPlaySrcs?.keys.length ?? 0;
-          final isFinished = availableEps >= totalEp || data['is_finished'] == true;
-
-          setState(() {
-            _drama = {
-              'id': widget.dramaId,
-              'title': data['title'] ?? '',
-              'cover': data['posterSrc'] ?? '',
-              'desc': data['description'] ?? '',
-              'tags': data['tags'] ?? [],
-              'totalEpisodes': totalEp,
-              'availableEpisodes': availableEps,
-              'isFinished': isFinished,
-              'epPlaySrcs': epPlaySrcs ?? {},
-              'score': data['score'] ?? 0,
-            };
-            _episodes = (epPlaySrcs?.keys ?? [])
-                .map((e) => int.parse(e.toString()))
-                .toList()
-              ..sort();
-            _loading = false;
-          });
-        }
-      }
+      final drama = await _api.fetchDetail(widget.dramaId);
+      if (!mounted) return;
+      setState(() {
+        _drama = drama;
+        _episodes = drama.episodes.map((episode) => episode.number).toList()
+          ..sort();
+        _loading = false;
+      });
     } catch (e) {
-      print('Detail error: $e');
-      setState(() => _loading = false);
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error =
+            e is VideoApiException && e.kind == VideoApiErrorKind.accessDenied
+                ? '此内容需要登录或访问授权，当前无法查看'
+                : '无法加载详情，请检查网络后重试';
+      });
     }
+  }
+
+  @override
+  void dispose() {
+    if (widget.client == null) _client.close();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_drama?['title'] ?? '加载中...'),
+        title: Text(_drama?.title ?? '详情'),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _drama == null
-              ? const Center(child: Text('加载失败'))
+              ? _LoadError(
+                  message: _error ?? '加载失败',
+                  onRetry: _loadDetail,
+                )
               : SingleChildScrollView(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Image.network(_drama!['cover']),
+                      if (_drama!.cover != null)
+                        Image.network(
+                          _drama!.cover.toString(),
+                          errorBuilder: (context, error, stackTrace) =>
+                              const SizedBox(
+                                  height: 120,
+                                  child: Center(
+                                      child: Icon(Icons.image_not_supported))),
+                        ),
                       Padding(
                         padding: const EdgeInsets.all(16),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              _drama!['title'],
-                              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                              _drama!.title,
+                              style: const TextStyle(
+                                  fontSize: 20, fontWeight: FontWeight.bold),
                             ),
                             const SizedBox(height: 8),
                             Row(
                               children: [
                                 Text(
-                                  _drama!['isFinished'] ? '已完结' : '连载中',
+                                  _drama!.isFinished ? '已完结' : '连载中',
                                   style: const TextStyle(color: Colors.amber),
                                 ),
                                 const SizedBox(width: 16),
                                 Text(
-                                  _drama!['isFinished']
-                                      ? '全${_drama!['totalEpisodes']}集'
-                                      : '更新至${_drama!['availableEpisodes']}集',
+                                  _drama!.isFinished
+                                      ? '全${_drama!.totalEpisodes}集'
+                                      : _episodes.isEmpty
+                                          ? '暂无剧集'
+                                          : '更新至${_episodes.last}集',
                                 ),
                                 const SizedBox(width: 16),
-                                Text('${_drama!['score']}分'),
+                                Text('${_drama!.score}分'),
                               ],
                             ),
                             const SizedBox(height: 8),
                             Wrap(
                               spacing: 8,
                               runSpacing: 8,
-                              children: (_drama!['tags'] as List<dynamic>)
+                              children: _drama!.tags
                                   .map((tag) => Chip(
                                         label: Text(tag.toString()),
-                                        backgroundColor: Colors.amber.withOpacity(0.2),
+                                        backgroundColor:
+                                            Colors.amber.withOpacity(0.2),
                                       ))
                                   .toList(),
                             ),
                             const SizedBox(height: 16),
-                            Text(_drama!['desc']),
+                            Text(_drama!.description),
                             const SizedBox(height: 24),
                             const Text(
                               '剧集列表',
-                              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                              style: TextStyle(
+                                  fontSize: 18, fontWeight: FontWeight.bold),
                             ),
                             const SizedBox(height: 8),
+                            if (_episodes.isEmpty) const Text('暂未获取到可播放剧集'),
                             Wrap(
                               spacing: 8,
                               runSpacing: 8,
@@ -486,8 +584,8 @@ class _DetailPageState extends State<DetailPage> {
                                             builder: (context) => PlayerPage(
                                               dramaId: widget.dramaId,
                                               episode: ep,
-                                              epPlaySrcs: _drama!['epPlaySrcs'],
-                                              dramaTitle: _drama!['title'],
+                                              dramaTitle: _drama!.title,
+                                              client: widget.client,
                                             ),
                                           ),
                                         ),
@@ -508,15 +606,18 @@ class _DetailPageState extends State<DetailPage> {
 class PlayerPage extends StatefulWidget {
   final int dramaId;
   final int episode;
-  final Map<String, dynamic> epPlaySrcs;
   final String dramaTitle;
+  final http.Client? client;
+  final VideoPlayerController Function(Uri, Map<String, String>)?
+      controllerFactory;
 
   const PlayerPage({
     super.key,
     required this.dramaId,
     required this.episode,
-    required this.epPlaySrcs,
     required this.dramaTitle,
+    this.client,
+    this.controllerFactory,
   });
 
   @override
@@ -524,36 +625,75 @@ class PlayerPage extends StatefulWidget {
 }
 
 class _PlayerPageState extends State<PlayerPage> {
+  late final http.Client _client = widget.client ?? http.Client();
+  late final VideoApi _api = VideoApi(
+    client: _client,
+    baseUrls: _apiBases.map(Uri.parse).toList(),
+  );
   VideoPlayerController? _controller;
+  int _requestId = 0;
   bool _loading = true;
+  String? _error;
   Timer? _timer;
 
   @override
   void initState() {
     super.initState();
     _initPlayer();
-    _startProgressTimer();
   }
 
   Future<void> _initPlayer() async {
-    final videoUrl = widget.epPlaySrcs[widget.episode.toString()] as String?;
-    if (videoUrl == null) {
+    final requestId = ++_requestId;
+    _timer?.cancel();
+    final previous = _controller;
+    _controller = null;
+    if (previous != null) unawaited(previous.dispose());
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    VideoPlayerController? controller;
+    try {
+      final playback = await _api.fetchPlayback(widget.dramaId, widget.episode);
+      if (!mounted || requestId != _requestId) return;
+      controller =
+          widget.controllerFactory?.call(playback.uri, playback.httpHeaders) ??
+              VideoPlayerController.networkUrl(
+                playback.uri,
+                httpHeaders: playback.httpHeaders,
+              );
+      _controller = controller;
+      await controller.initialize().timeout(const Duration(seconds: 20));
+      if (!mounted || requestId != _requestId) return;
+
+      // 恢复进度后再开始播放，避免先播放开头并覆盖已保存的进度。
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted || requestId != _requestId) return;
+      final savedTime =
+          prefs.getDouble('progress_${widget.dramaId}_${widget.episode}');
+      if (savedTime != null &&
+          savedTime.isFinite &&
+          savedTime > 0 &&
+          savedTime < controller.value.duration.inSeconds) {
+        await controller.seekTo(Duration(seconds: savedTime.toInt()));
+        if (!mounted || requestId != _requestId) return;
+      }
+      await controller.play();
+      if (!mounted || requestId != _requestId) return;
       setState(() => _loading = false);
-      return;
+      _startProgressTimer();
+    } catch (e) {
+      if (!mounted || requestId != _requestId) return;
+      _controller = null;
+      if (controller != null) unawaited(controller.dispose());
+      setState(() {
+        _loading = false;
+        _error =
+            e is VideoApiException && e.kind == VideoApiErrorKind.accessDenied
+                ? '此剧集需要登录或访问授权，当前无法播放'
+                : '视频加载失败，请重试';
+      });
     }
-
-    _controller = VideoPlayerController.networkUrl(Uri.parse(videoUrl));
-    await _controller!.initialize();
-    await _controller!.play();
-
-    // 恢复上次进度
-    final prefs = await SharedPreferences.getInstance();
-    final savedTime = prefs.getDouble('progress_${widget.dramaId}_${widget.episode}');
-    if (savedTime != null && savedTime > 0) {
-      _controller!.seekTo(Duration(seconds: savedTime.toInt()));
-    }
-
-    setState(() => _loading = false);
   }
 
   void _startProgressTimer() {
@@ -565,21 +705,34 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   Future<void> _saveProgress() async {
-    if (_controller != null) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble(
-        'progress_${widget.dramaId}_${widget.episode}',
-        _controller!.value.position.inSeconds.toDouble(),
-      );
-      await prefs.setInt('last_drama_id', widget.dramaId);
-      await prefs.setInt('last_episode', widget.episode);
+    final controller = _controller;
+    if (controller != null &&
+        controller.value.isInitialized &&
+        !controller.value.hasError) {
+      final position = controller.value.position.inSeconds.toDouble();
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setDouble(
+          'progress_${widget.dramaId}_${widget.episode}',
+          position,
+        );
+        await prefs.setInt('last_drama_id', widget.dramaId);
+        await prefs.setInt('last_episode', widget.episode);
+      } catch (e) {
+        debugPrint('Saving progress failed: $e');
+      }
     }
   }
 
   @override
   void dispose() {
+    ++_requestId;
     _timer?.cancel();
-    _controller?.dispose();
+    unawaited(_saveProgress());
+    final controller = _controller;
+    _controller = null;
+    if (controller != null) unawaited(controller.dispose());
+    if (widget.client == null) _client.close();
     super.dispose();
   }
 
@@ -591,42 +744,67 @@ class _PlayerPageState extends State<PlayerPage> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : Column(
-              children: [
-                AspectRatio(
-                  aspectRatio: _controller!.value.aspectRatio,
-                  child: VideoPlayer(_controller!),
+          : _error != null || _controller == null
+              ? _LoadError(
+                  message: _error ?? '播放地址无效',
+                  onRetry: _initPlayer,
+                )
+              : SafeArea(
+                  child: ValueListenableBuilder<VideoPlayerValue>(
+                    valueListenable: _controller!,
+                    builder: (context, value, child) {
+                      if (value.hasError) {
+                        return _LoadError(
+                          message: '播放中断，请重试',
+                          onRetry: _initPlayer,
+                        );
+                      }
+                      return Column(
+                        children: [
+                          Expanded(
+                            child: Center(
+                              child: AspectRatio(
+                                aspectRatio: value.aspectRatio,
+                                child: VideoPlayer(_controller!),
+                              ),
+                            ),
+                          ),
+                          VideoProgressIndicator(_controller!,
+                              allowScrubbing: true),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.replay_10),
+                                onPressed: () => _controller!.seekTo(
+                                  _controller!.value.position -
+                                      const Duration(seconds: 10),
+                                ),
+                              ),
+                              IconButton(
+                                icon: Icon(value.isPlaying
+                                    ? Icons.pause
+                                    : Icons.play_arrow),
+                                onPressed: () {
+                                  value.isPlaying
+                                      ? _controller!.pause()
+                                      : _controller!.play();
+                                },
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.forward_10),
+                                onPressed: () => _controller!.seekTo(
+                                  _controller!.value.position +
+                                      const Duration(seconds: 10),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      );
+                    },
+                  ),
                 ),
-                VideoProgressIndicator(_controller!, allowScrubbing: true),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.replay_10),
-                      onPressed: () => _controller!.seekTo(
-                        _controller!.value.position - const Duration(seconds: 10),
-                      ),
-                    ),
-                    IconButton(
-                      icon: Icon(_controller!.value.isPlaying ? Icons.pause : Icons.play_arrow),
-                      onPressed: () {
-                        setState(() {
-                          _controller!.value.isPlaying
-                              ? _controller!.pause()
-                              : _controller!.play();
-                        });
-                      },
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.forward_10),
-                      onPressed: () => _controller!.seekTo(
-                        _controller!.value.position + const Duration(seconds: 10),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
     );
   }
 }
@@ -649,6 +827,7 @@ class _HistoryPageState extends State<HistoryPage> {
 
   Future<void> _loadHistory() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     final lastDramaId = prefs.getInt('last_drama_id');
     final lastEpisode = prefs.getInt('last_episode');
 
@@ -676,6 +855,7 @@ class _HistoryPageState extends State<HistoryPage> {
               final prefs = await SharedPreferences.getInstance();
               await prefs.remove('last_drama_id');
               await prefs.remove('last_episode');
+              if (!mounted) return;
               setState(() => _history.clear());
             },
           ),
@@ -693,7 +873,8 @@ class _HistoryPageState extends State<HistoryPage> {
                   onTap: () => Navigator.push(
                     context,
                     MaterialPageRoute(
-                      builder: (context) => DetailPage(dramaId: item['dramaId']),
+                      builder: (context) =>
+                          DetailPage(dramaId: item['dramaId']),
                     ),
                   ),
                 );
